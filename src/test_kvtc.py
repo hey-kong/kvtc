@@ -177,6 +177,27 @@ def test_full_pipeline_roundtrip() -> None:
     assert restored["values"].shape == kv_cache["values"].shape
 
 
+def test_decompress_layer_matches_full_decompress() -> None:
+    kv_cache, positions = _synthetic_kv(layers=3)
+    calibration = _calibration_from_cache(kv_cache, positions)
+    compressor = KVTCCompressor(calibration)
+    compressed = compressor.compress(kv_cache, positions)
+    restored_full = compressor.decompress(compressed)
+    for layer_idx in range(kv_cache["keys"].shape[0]):
+        restored_layer = compressor.decompress_layer(compressed, layer_idx)
+        assert torch.allclose(restored_layer["keys"], restored_full["keys"][layer_idx])
+        assert torch.allclose(restored_layer["values"], restored_full["values"][layer_idx])
+
+
+def test_decompress_layer_rejects_invalid_index() -> None:
+    kv_cache, positions = _synthetic_kv(layers=2)
+    calibration = _calibration_from_cache(kv_cache, positions)
+    compressor = KVTCCompressor(calibration)
+    compressed = compressor.compress(kv_cache, positions)
+    with pytest.raises(ValueError):
+        compressor.decompress_layer(compressed, layer_idx=2)
+
+
 def test_attention_sinks_preserved_exactly() -> None:
     kv_cache, positions = _synthetic_kv(tokens=160)
     calibration = _calibration_from_cache(kv_cache, positions)

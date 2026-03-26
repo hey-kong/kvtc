@@ -107,15 +107,58 @@ class KVTCCompressor:
         )
         return CompressedKVCache(sinks=sinks, window=window, compressed_sections=compressed_sections, metadata=metadata)
 
-    def decompress(self, compressed_cache: CompressedKVCache) -> Dict[str, torch.Tensor]:
-        """Reverse the full KVTC pipeline."""
-
+    def _validate_metadata(self, compressed_cache: CompressedKVCache) -> tuple[int, int, int, int, int, int, int]:
         if compressed_cache.metadata is None:
             raise ValueError("Missing metadata.")
         layers, tokens, heads, dim = compressed_cache.metadata.original_shape
         sink_len = compressed_cache.metadata.sink_len
         middle_len = compressed_cache.metadata.middle_len
         window_len = compressed_cache.metadata.window_len
+        return layers, tokens, heads, dim, sink_len, middle_len, window_len
+
+    def _decompress_middle_section(
+        self,
+        result: Dict[str, torch.Tensor],
+        section: CompressedSection,
+        sink_len: int,
+        middle_len: int,
+        dim: int,
+        positions_middle: torch.Tensor,
+        target_layer_idx: int,
+        calibration_layer_idx: int,
+    ) -> None:
+        entry = self.calibration_data.entries[(calibration_layer_idx, section.group_idx, section.kind)]
+        packed = entropy_decompress(section.compressed_bytes, section.packed_size)
+        unpacked = unpack_bits(packed, section.bit_widths, section.lengths)
+        dequantized = torch.stack(
+            [
+                uniform_dequantize(
+                    component,
+                    int(section.bit_widths[idx]),
+                    float(section.scales[idx]),
+                    float(section.zero_points[idx]),
+                )
+                for idx, component in enumerate(unpacked)
+            ],
+            dim=-1,
+        )
+        restored = pca_inverse(dequantized, entry.eigenvectors.to(dequantized.device)) + entry.mean.to(dequantized.device)
+        group = restored.reshape(middle_len, section.group_heads, dim)
+        if section.kind == "keys":
+            group = apply_rope(
+                group,
+                positions_middle,
+                rope_theta=self.calibration_data.rope_theta,
+                head_dim=dim,
+            )
+        start = section.group_idx * self.calibration_data.head_group_size
+        result[section.kind][target_layer_idx, sink_len : sink_len + middle_len, start : start + section.group_heads] = group.to(
+            result[section.kind].dtype
+        )
+
+    def decompress(self, compressed_cache: CompressedKVCache) -> Dict[str, torch.Tensor]:
+        """Reverse the full KVTC pipeline."""
+        layers, tokens, heads, dim, sink_len, middle_len, window_len = self._validate_metadata(compressed_cache)
         result = {
             "keys": torch.zeros((layers, tokens, heads, dim), dtype=compressed_cache.sinks["keys"].dtype),
             "values": torch.zeros((layers, tokens, heads, dim), dtype=compressed_cache.sinks["values"].dtype),
@@ -128,32 +171,47 @@ class KVTCCompressor:
             result["values"][:, tokens - window_len :] = compressed_cache.window["values"]
         positions_middle = torch.tensor(compressed_cache.metadata.positions_middle, dtype=torch.long)
         for section in compressed_cache.compressed_sections:
-            entry = self.calibration_data.entries[(section.layer_idx, section.group_idx, section.kind)]
-            packed = entropy_decompress(section.compressed_bytes, section.packed_size)
-            unpacked = unpack_bits(packed, section.bit_widths, section.lengths)
-            dequantized = torch.stack(
-                [
-                    uniform_dequantize(
-                        component,
-                        int(section.bit_widths[idx]),
-                        float(section.scales[idx]),
-                        float(section.zero_points[idx]),
-                    )
-                    for idx, component in enumerate(unpacked)
-                ],
-                dim=-1,
-            )
-            restored = pca_inverse(dequantized, entry.eigenvectors.to(dequantized.device)) + entry.mean.to(dequantized.device)
-            group = restored.reshape(middle_len, section.group_heads, dim)
-            if section.kind == "keys":
-                group = apply_rope(
-                    group,
-                    positions_middle,
-                    rope_theta=self.calibration_data.rope_theta,
-                    head_dim=dim,
-                )
-            start = section.group_idx * self.calibration_data.head_group_size
-            result[section.kind][section.layer_idx, sink_len : sink_len + middle_len, start : start + section.group_heads] = group.to(
-                result[section.kind].dtype
+            self._decompress_middle_section(
+                result=result,
+                section=section,
+                sink_len=sink_len,
+                middle_len=middle_len,
+                dim=dim,
+                positions_middle=positions_middle,
+                target_layer_idx=section.layer_idx,
+                calibration_layer_idx=section.layer_idx,
             )
         return result
+
+    def decompress_layer(self, compressed_cache: CompressedKVCache, layer_idx: int) -> Dict[str, torch.Tensor]:
+        """Decompress a single layer and return tensors shaped [tokens, heads, dim]."""
+        layers, tokens, heads, dim, sink_len, middle_len, window_len = self._validate_metadata(compressed_cache)
+        if layer_idx < 0 or layer_idx >= layers:
+            raise ValueError(f"layer_idx {layer_idx} is out of range for {layers} layers.")
+        result = {
+            "keys": torch.zeros((tokens, heads, dim), dtype=compressed_cache.sinks["keys"].dtype),
+            "values": torch.zeros((tokens, heads, dim), dtype=compressed_cache.sinks["values"].dtype),
+        }
+        if sink_len:
+            result["keys"][:sink_len] = compressed_cache.sinks["keys"][layer_idx]
+            result["values"][:sink_len] = compressed_cache.sinks["values"][layer_idx]
+        if window_len:
+            result["keys"][tokens - window_len :] = compressed_cache.window["keys"][layer_idx]
+            result["values"][tokens - window_len :] = compressed_cache.window["values"][layer_idx]
+
+        positions_middle = torch.tensor(compressed_cache.metadata.positions_middle, dtype=torch.long)
+        layer_result = {"keys": result["keys"].unsqueeze(0), "values": result["values"].unsqueeze(0)}
+        for section in compressed_cache.compressed_sections:
+            if section.layer_idx != layer_idx:
+                continue
+            self._decompress_middle_section(
+                result=layer_result,
+                section=section,
+                sink_len=sink_len,
+                middle_len=middle_len,
+                dim=dim,
+                positions_middle=positions_middle,
+                target_layer_idx=0,
+                calibration_layer_idx=layer_idx,
+            )
+        return {"keys": layer_result["keys"][0], "values": layer_result["values"][0]}
