@@ -106,8 +106,23 @@ compressor = KVTCCompressor(calibration)
 compressed = compressor.compress(kv_cache, positions)
 print(f"Compression ratio: {compressed.metadata.compression_ratio:.1f}x")
 
-# Step 3: Decompress (lossless for sinks/window, lossy for middle)
-restored = compressor.decompress(compressed)
+# Step 3A: Full decompress (baseline)
+restored_full = compressor.decompress(compressed)
+
+# Step 3B: Layer-by-layer decompress + check
+num_layers = kv_cache["keys"].shape[0]
+for layer_idx in range(num_layers):
+    restored_layer = compressor.decompress_layer(compressed, layer_idx)
+
+    # shape check: [tokens, heads, dim]
+    assert restored_layer["keys"].shape == kv_cache["keys"][layer_idx].shape
+    assert restored_layer["values"].shape == kv_cache["values"][layer_idx].shape
+
+    # consistency check vs full decompress
+    assert torch.allclose(restored_layer["keys"], restored_full["keys"][layer_idx], atol=1e-6)
+    assert torch.allclose(restored_layer["values"], restored_full["values"][layer_idx], atol=1e-6)
+
+print("decompress_layer test passed.")
 ```
 
 ### Compression Modes
