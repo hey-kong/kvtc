@@ -76,10 +76,12 @@ Decompression reverses the pipeline: DEFLATE → unpack → dequantize → PCA i
 ## Quick Start
 
 ```bash
-git clone https://github.com/OnlyTerp/kvtc.git
+git clone https://github.com/hey-kong/kvtc.git
 cd kvtc
-pip install -e ".[dev]"
-pytest src/test_kvtc.py  # 38 tests
+uv venv --python=3.12 && source .venv/bin/activate
+uv pip install -e .
+(uv pip install pytest)
+pytest src/test_kvtc.py  # 40 tests
 ```
 
 ```python
