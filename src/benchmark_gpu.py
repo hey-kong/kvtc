@@ -269,10 +269,16 @@ def main():
         "trust_remote_code": True,
     }
     if args.load_in_8bit:
-        load_kwargs["load_in_8bit"] = True
+        from transformers import BitsAndBytesConfig
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
         load_kwargs["device_map"] = "auto"
     elif args.load_in_4bit:
-        load_kwargs["load_in_4bit"] = True
+        from transformers import BitsAndBytesConfig
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type="nf4",
+        )
         load_kwargs["device_map"] = "auto"
     else:
         load_kwargs["torch_dtype"] = torch.float16 if args.device == "cuda" else torch.float32
