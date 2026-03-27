@@ -262,10 +262,11 @@ def main():
     print("\n[1/4] Loading model...")
     from transformers import AutoModelForCausalLM, AutoTokenizer
     
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         torch_dtype=torch.float16 if args.device == "cuda" else torch.float32,
+        trust_remote_code=True,
     )
     if args.device == "cuda":
         model = model.cuda()
