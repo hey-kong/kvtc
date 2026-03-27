@@ -122,7 +122,9 @@ def gpu_pack_variable_width(
     accumulator = 0
     bits_in_acc = 0
     total_bits = sum(int(w) * num_rows for w in bw_list if w > 0)
-    output = bytearray((total_bits + 7) // 8 + 8)
+    # Generous allocation: fast path can write extra padding bytes per word
+    max_extra = num_components * 8  # up to 8 extra bytes per component from word padding
+    output = bytearray((total_bits + 7) // 8 + max_extra + 64)
     out_idx = 0
     
     for comp_idx in range(num_components):
